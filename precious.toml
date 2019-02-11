@@ -1,0 +1,31 @@
+ignore  = ".gitignore"
+exclude = "vendor/**/*"
+
+[[commands]]
+
+  [[commands.golangci-lint]]
+  type    = "lint"
+  include = "**/*.go"
+  cmd     = ["golangci-lint", "run"]
+  args    = ["--config", ".golangci-lint.yml"]
+  on_dir  = true
+  ok_exit_codes = [0, 1]
+
+[[servers]]
+
+  [[servers.perl-lsp]]
+  type       = "both"
+  include    = "**/*.pl"
+  cmd        = ["perl-lsp", "--port", "12345"]
+  port       = 12345
+  persistent = true
+
+[[commands]]
+
+  [[commands.json-ordered-tidy]]
+  type    = "tidy"
+  include = "**/*.json"
+  cmd     = "json-ordered-tidy"
+  args    = ["--config", "$CONFIG_ROOT/.json-ordered-tidy.json"]
+  path_flag = "-f"
+  ok_exit_codes = 1
