@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	alog "github.com/apex/log"
 	"github.com/houseabsolute/precious/internal/pathfilter"
 	"github.com/mattn/go-zglob/fastwalk"
 	"github.com/pkg/errors"
@@ -21,13 +22,14 @@ const (
 )
 
 type BasePaths struct {
+	l         *alog.Logger
 	mode      Mode
 	cliPaths  []string
 	basePaths *[]string
 	filter    *pathfilter.Filter
 }
 
-func New(m Mode, cliPaths, exclude, ignoreFiles []string) (*BasePaths, error) {
+func New(l *alog.Logger, m Mode, cliPaths, exclude, ignoreFiles []string) (*BasePaths, error) {
 	if m != FromCLI && len(cliPaths) != 0 {
 		return nil, errors.New("You cannot provide paths on the command line along with the -a, -g, or -s flags")
 	}
@@ -38,6 +40,7 @@ func New(m Mode, cliPaths, exclude, ignoreFiles []string) (*BasePaths, error) {
 	}
 
 	return &BasePaths{
+		l:        l,
 		mode:     m,
 		cliPaths: cliPaths,
 		filter:   filter,
@@ -45,7 +48,7 @@ func New(m Mode, cliPaths, exclude, ignoreFiles []string) (*BasePaths, error) {
 }
 
 func (bf *BasePaths) Paths() ([]string, error) {
-	if *bf.basePaths != nil {
+	if bf.basePaths != nil {
 		return *bf.basePaths, nil
 	}
 
@@ -87,17 +90,21 @@ func (bf *BasePaths) Paths() ([]string, error) {
 
 func (bf *BasePaths) startingPaths() ([]string, error) {
 	if len(bf.cliPaths) > 0 {
+		bf.l.Debugf("Using explicit list of starting paths: %s", bf.cliPaths)
 		return bf.cliPaths, nil
 	} else if bf.mode == GitModified {
-
+		bf.l.Info("Using git modified paths as starting paths")
+		return nil, nil
 	} else if bf.mode == GitStaged {
-
+		bf.l.Info("Using git staged paths as starting paths")
+		return nil, nil
 	}
 
 	wd, err := os.Getwd()
 	if err != nil {
 		return []string{}, errors.Wrap(err, "Could not get your current working directory")
 	}
+	bf.l.Infof("Using %s as starting path", wd)
 	return []string{wd}, nil
 }
 

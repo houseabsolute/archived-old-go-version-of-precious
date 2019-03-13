@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	alog "github.com/apex/log"
 	toml "github.com/pelletier/go-toml"
 	"github.com/pkg/errors"
 )
@@ -19,6 +20,14 @@ type command struct {
 	pathFlag    string
 	okExitCodes []int64
 }
+
+type filterType string
+
+const (
+	tidy filterType = "tidy"
+	lint            = "lint"
+	both            = "both"
+)
 
 type filterConfig struct {
 	name    string
@@ -37,16 +46,17 @@ type Config struct {
 	Ignore  []string
 	Exclude []string
 	filters []filterConfig
+	l       *alog.Logger
 }
 
-func NewFromFile(file string) (*Config, error) {
+func NewFromFile(l *alog.Logger, file string) (*Config, error) {
 	tree, err := toml.LoadFile(file)
 	if err != nil {
 		return nil, errors.Wrap(err, fmt.Sprintf("Error reading config from %s", file))
 	}
 
-	c := &Config{}
-	msgs := validateAndSetConfig(c, tree, file)
+	c := &Config{l: l}
+	msgs := validateAndSetConfig(l, c, tree, file)
 	if len(msgs) != 0 {
 		combined := fmt.Sprintf("There was one or more errors with your configuration file at %s:\n", file)
 		for _, M := range msgs {
@@ -58,17 +68,17 @@ func NewFromFile(file string) (*Config, error) {
 	return c, nil
 }
 
-func validateAndSetConfig(c *Config, tree *toml.Tree, file string) []string {
+func validateAndSetConfig(l *alog.Logger, c *Config, tree *toml.Tree, file string) []string {
 	msgs := []string{}
 
 	c.Ignore = getStringOrStringArray("global", tree, "ignore", &msgs)
 	c.Exclude = getStringOrStringArray("global", tree, "exclude", &msgs)
-	c.filters = getFilters(tree, file, &msgs)
+	c.filters = getFilters(l, tree, file, &msgs)
 
 	return msgs
 }
 
-func getFilters(tree *toml.Tree, file string, msgs *[]string) []filterConfig {
+func getFilters(l *alog.Logger, tree *toml.Tree, file string, msgs *[]string) []filterConfig {
 	if !tree.Has("servers") && !tree.Has("commands") {
 		*msgs = append(*msgs, fmt.Sprintf("You must define at least one server or command in your config file at %s", file))
 		return []filterConfig{}
@@ -83,12 +93,16 @@ func getFilters(tree *toml.Tree, file string, msgs *[]string) []filterConfig {
 	}
 
 	if tree.Has("servers") {
+		l.Debug("Found [[servers]] in config")
+
 		servers := tree.Get("servers")
 		switch s := servers.(type) {
 		case []*toml.Tree:
 			for _, t := range s {
+				line := t.Position().Line
 				name := t.Keys()[0]
-				filters[t.Position().Line] = treeToServer(configRoot, name, t.Get(name).([]*toml.Tree)[0], msgs)
+				l.Debugf("Found server %s at line %d", name, line)
+				filters[line] = treeToServer(l, configRoot, name, t.Get(name).([]*toml.Tree)[0], msgs)
 			}
 		default:
 			*msgs = append(*msgs,
@@ -97,12 +111,16 @@ func getFilters(tree *toml.Tree, file string, msgs *[]string) []filterConfig {
 	}
 
 	if tree.Has("commands") {
+		l.Debug("Found [[commands]] in config")
+
 		commands := tree.Get("commands")
 		switch c := commands.(type) {
 		case []*toml.Tree:
 			for _, t := range c {
+				line := t.Position().Line
 				name := t.Keys()[0]
-				filters[t.Position().Line] = treeToCommand(configRoot, name, t.Get(name).([]*toml.Tree)[0], msgs)
+				l.Debugf("Found command %s at line %d", name, line)
+				filters[t.Position().Line] = treeToCommand(l, configRoot, name, t.Get(name).([]*toml.Tree)[0], msgs)
 			}
 		default:
 			*msgs = append(*msgs,
@@ -124,18 +142,20 @@ func getFilters(tree *toml.Tree, file string, msgs *[]string) []filterConfig {
 	return sorted
 }
 
-func treeToServer(configRoot, name string, s *toml.Tree, msgs *[]string) filterConfig {
+func treeToServer(l *alog.Logger, configRoot, name string, s *toml.Tree, msgs *[]string) filterConfig {
 	f := baseFilterConfig(configRoot, name, s, msgs)
 	f.server = &server{port: getInt64(name, s, "port", msgs)}
+	l.Debugf("%+v", f)
 	return f
 }
 
-func treeToCommand(configRoot, name string, c *toml.Tree, msgs *[]string) filterConfig {
+func treeToCommand(l *alog.Logger, configRoot, name string, c *toml.Tree, msgs *[]string) filterConfig {
 	f := baseFilterConfig(configRoot, name, c, msgs)
 	f.command = &command{
 		pathFlag:    getString(name, c, "path_flag", msgs),
 		okExitCodes: getInt64OrInt64Array(name, c, "ok_exit_codes", msgs),
 	}
+	l.Debugf("%+v", f)
 	return f
 }
 
@@ -258,14 +278,44 @@ func getInt64OrInt64Array(name string, tree *toml.Tree, key string, msgs *[]stri
 func applyRoot(root string, vals []string) []string {
 	applied := []string{}
 	for _, v := range vals {
-		applied = append(applied, strings.Replace(v, "$CONFIG_ROOT", root, -1))
+		applied = append(applied, strings.Replace(v, "$CONFIG_DIR", root, -1))
 	}
 	return applied
 }
 
-// func (c *Config) Tidiers() []Tidier {
-// 	t := []Tidier{}
-// 	for _, f := range c.Filters {
-// 		if c.
-// 	return []Tidier{}
-// }
+func (c *Config) Tidyers() []tidyer.Tidyer {
+	tidyers := []*tidyer.Tidyer{}
+	for _, f := range c.filters {
+		if f.typ != lint {
+			var t *tidyer.Tidyer
+			var err error
+			if f.server != nil {
+				t, err = tidyer.NewServer(
+					f.name,
+					f.ignore,
+					f.include,
+					f.exclude,
+					f.cmd,
+					f.args,
+					f.onDir,
+					f.server.port,
+				)
+			} else {
+				t, err = tidyer.NewCommand(
+					f.name,
+					f.ignore,
+					f.include,
+					f.exclude,
+					f.cmd,
+					f.args,
+					f.onDir,
+					f.command.pathFlag,
+					f.command.okExitCodes,
+				)
+			}
+
+			tidyers = append(tidyers, t)
+		}
+	}
+	return t
+}

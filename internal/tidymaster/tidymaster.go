@@ -1,25 +1,27 @@
 package tidymaster
 
 import (
-	"github.com/apex/log"
+	alog "github.com/apex/log"
 	"github.com/houseabsolute/precious/internal/basepaths"
 	"github.com/houseabsolute/precious/internal/config"
 )
 
 type TidyMaster struct {
-	l  *log.Logger
+	l  *alog.Logger
 	c  *config.Config
-	bf *basepaths.BasePaths
+	bp *basepaths.BasePaths
 }
 
-func New(l *log.Logger, c *config.Config, bf *basepaths.BasePaths) (*TidyMaster, error) {
-	return &TidyMaster{l, c, bf}, nil
+func New(l *alog.Logger, c *config.Config, bp *basepaths.BasePaths) (*TidyMaster, error) {
+	return &TidyMaster{l, c, bp}, nil
 }
 
 func (tm *TidyMaster) Tidy() error {
-	// for _, filter := range tm.c.Tidiers() {
-	// 	filter.Tidy(bf)
-	// }
+	paths := tm.bp.Paths()
+
+	for _, filter := range tm.c.Tidiers() {
+		filter.Tidy(paths)
+	}
 
 	return nil
 }

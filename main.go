@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/apex/log"
+	alog "github.com/apex/log"
 	clilog "github.com/apex/log/handlers/cli"
 	"github.com/houseabsolute/precious/internal/basepaths"
 	"github.com/houseabsolute/precious/internal/config"
@@ -39,30 +39,38 @@ servers, leaving them running in the background in order to speed up usage
 while you develop locally.
 `
 
-	var (
-		verbose = app.BoolOpt("v verbose", false, "Enable verbose output")
-		debug   = app.BoolOpt("d debug", false, "Enable debugging output")
-		quiet   = app.BoolOpt("q quiet", false, "Suppress most output")
-	)
+	app.Spec = "-c [-d | -v | -q]"
+	conf := app.StringOpt("c config", "", "Path to config file")
+	verbose := app.BoolOpt("v verbose", false, "Enable verbose output")
+	debug := app.BoolOpt("d debug", false, "Enable debugging output")
+	quiet := app.BoolOpt("q quiet", false, "Suppress most output")
 
-//	app.Spec = "[-d | -v | -q]"
+	getRootArgs := func() (*alog.Logger, *config.Config) {
+		lvl := alog.InfoLevel
+		if *debug {
+			lvl = alog.DebugLevel
+		} else if *verbose {
+			lvl = alog.InfoLevel
+		} else if *quiet {
+			lvl = alog.WarnLevel
+		}
 
-	lvl := log.InfoLevel
-	if *debug {
-		lvl = log.DebugLevel
-	} else if *verbose {
-		lvl = log.InfoLevel
-	} else if *quiet {
-		lvl = log.WarnLevel
+		l := &alog.Logger{
+			Handler: clilog.New(os.Stderr),
+			Level:   lvl,
+		}
+
+		if *debug {
+			l.Debug("Enabling debug level output")
+		}
+
+		c := loadConfig(l, *conf)
+
+		return l, c
 	}
 
-	l := &log.Logger{
-		Handler: clilog.New(os.Stderr),
-		Level:   lvl,
-	}
-
-	app.Command("tidy", "Tidies the specified files/dirs", tidyCmd(l))
-	app.Command("lint", "Lints the specified files/dirs", lintCmd(l))
+	app.Command("tidy", "Tidies the specified files/dirs", tidyCmd(getRootArgs))
+	app.Command("lint", "Lints the specified files/dirs", lintCmd(getRootArgs))
 
 	app.Run(os.Args)
 }
@@ -81,15 +89,15 @@ func isCheckoutRoot(dir string) bool {
 	return false
 }
 
-func tidyCmd(l *log.Logger) func(*cli.Cmd) {
+func tidyCmd(getRootArgs func() (*alog.Logger, *config.Config)) func(*cli.Cmd) {
 	return func(cmd *cli.Cmd) {
-		mode, paths, conf := sharedArgs(cmd, "Tidy")
-		c := loadConfig(l, conf)
+		mode, paths := sharedSubcommandArgs(cmd, "Tidy")
 
 		cmd.Action = func() {
-			bf, err := basepaths.New(mode, paths, c.Exclude, c.Ignore)
+			l, c := getRootArgs()
+			bf, err := basepaths.New(l, mode, paths, c.Exclude, c.Ignore)
 			if err != nil {
-				l.Fatalf("%+v", err)
+				fatal(l, "%+v", err)
 			}
 			defer func() {
 				bf.UnstashIfNeeded()
@@ -97,51 +105,45 @@ func tidyCmd(l *log.Logger) func(*cli.Cmd) {
 
 			tidymaster, err := tidymaster.New(l, c, bf)
 			if err != nil {
-				l.Fatalf("%+v", err)
+				fatal(l, "%+v", err)
 			}
 
 			err = tidymaster.Tidy()
 			if err != nil {
-				l.Fatalf("%+v", err)
+				fatal(l, "%+v", err)
 			}
 		}
 	}
 }
 
-func lintCmd(l *log.Logger) func(*cli.Cmd) {
+func lintCmd(getRootArgs func() (*alog.Logger, *config.Config)) func(*cli.Cmd) {
 	return func(cmd *cli.Cmd) {
 	}
 }
 
-func sharedArgs(cmd *cli.Cmd, action string) (basepaths.Mode, []string, string) {
-	var (
-		conf = cmd.StringOpt("c config", "", "Path to config file")
-		all  = cmd.BoolOpt(
-			"a all", false, fmt.Sprintf("%s everything in the current directory and below", action))
-		git = cmd.BoolOpt(
-			"g git", false, fmt.Sprintf("%s files that have been modified according to git", action))
-		staged = cmd.BoolOpt(
-			"s staged", false, fmt.Sprintf("%s file content that is staged for a git commit (use this for commit hooks)", action))
-		paths = cmd.StringsArg("PATHS", []string{}, fmt.Sprintf("A list of paths to %s", strings.ToLower(action)))
-	)
-
-	cmd.Spec = "-c [-a | -g | -s | PATHS]"
-
-	log.Infof("CONF = [%s]", *conf)
+func sharedSubcommandArgs(cmd *cli.Cmd, action string) (basepaths.Mode, []string) {
+	cmd.Spec = "[-a | -g | -s | PATHS]"
+	all := cmd.BoolOpt(
+		"a all", false, fmt.Sprintf("%s everything in the current directory and below", action))
+	git := cmd.BoolOpt(
+		"g git", false, fmt.Sprintf("%s files that have been modified according to git", action))
+	staged := cmd.BoolOpt(
+		"s staged", false, fmt.Sprintf("%s file content that is staged for a git commit (use this for commit hooks)", action))
+	paths := cmd.StringsArg("PATHS", []string{}, fmt.Sprintf("A list of paths to %s", strings.ToLower(action)))
 
 	switch {
 	case *all:
-		return basepaths.AllFiles, *paths, *conf
+		return basepaths.AllFiles, *paths
 	case *git:
-		return basepaths.GitModified, *paths, *conf
+		return basepaths.GitModified, *paths
 	case *staged:
-		return basepaths.GitStaged, *paths, *conf
+		return basepaths.GitStaged, *paths
 	default:
-		return basepaths.FromCLI, *paths, *conf
+		return basepaths.FromCLI, *paths
 	}
 }
 
-func loadConfig(l *log.Logger, path string) *config.Config {
+func loadConfig(l *alog.Logger, path string) *config.Config {
 	var configFile string
 	if path != "" {
 		configFile = path
@@ -150,17 +152,22 @@ func loadConfig(l *log.Logger, path string) *config.Config {
 		var err error
 		configFile, err = defaultConfigFile()
 		if err != nil {
-			l.Fatal(fmt.Sprintf("%+v", err))
+			fatal(l, fmt.Sprintf("%+v", err))
 		}
 		l.Infof("Loading config from %s (default location)", configFile)
 	}
 
-	c, err := config.NewFromFile(configFile)
+	c, err := config.NewFromFile(l, configFile)
 	if err != nil {
-		l.Fatal(fmt.Sprintf("%+v", err))
+		fatal(l, fmt.Sprintf("%+v", err))
 	}
 
 	return c
+}
+
+func fatal(l *alog.Logger, msg string, args ...interface{}) {
+	l.Errorf(msg, args...)
+	cli.Exit(1)
 }
 
 func defaultConfigFile() (string, error) {
